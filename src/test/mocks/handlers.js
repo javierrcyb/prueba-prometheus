@@ -1,57 +1,54 @@
-// MSW request handlers for the configured Airtable REST API.
-// Handlers are permissive on query params (filterByFormula / sort / offset) and key off the
-// table path segment. Pagination: an `offset` query param causes the handler to return a page
-// WITHOUT a further `offset` (i.e. one extra page then stop), so paginating loops terminate.
+// src/test/mocks/handlers.js
+// MSW handlers for the app's own backend (routes from src/lib/api.js).
+// No Airtable and no API key in the frontend.
 import { http, HttpResponse } from "msw";
-import { AIRTABLE_API_URL, AIRTABLE_BASE_ID } from "../../config/airtable";
-import {
-  siteStatusRecords,
-  inventoryRecords,
-  manufacturerRecords,
-  skuRecords,
-  skuGroupRecords,
-  partnerRecords,
-  clinicianRecords,
-} from "./fixtures";
+import { API_URL } from "../../config/api";
+import { inventoryRecords, partnerOptions } from "./fixtures";
 
-const BASE = `${AIRTABLE_API_URL}/${AIRTABLE_BASE_ID}`;
-
-// Airtable envelopes a list response as { records, offset? }.
-const list = (records, { offset } = {}) =>
-  HttpResponse.json(offset ? { records, offset } : { records });
+const API = `${API_URL}/api`;
 
 export const handlers = [
-  // Site-Status: platform + pop-up message records.
-  http.get(`${BASE}/Site-Status`, () => list(siteStatusRecords)),
+  // getSiteStatus
+  http.get(`${API}/site-status`, () =>
+    HttpResponse.json({
+      announcement: { status: "Offline", message: "" },
+      platform: { status: "Online", message: "" },
+    })
+  ),
 
-  // Inventory (single record fetch, e.g. cart validation PATCH target lookups by id).
-  http.get(`${BASE}/Inventory/:recordId`, ({ params }) => {
-    const record = inventoryRecords.find((r) => r.id === params.recordId);
-    return record ? HttpResponse.json(record) : new HttpResponse(null, { status: 404 });
+  // getSKUGroups -> array
+  http.get(`${API}/sku-groups`, () => HttpResponse.json([])),
+
+  // getMaxSize -> { maxSize }
+  http.get(`${API}/inventory/max-size`, () =>
+    HttpResponse.json({ maxSize: 60 })
+  ),
+
+  // getInventoryPage / getAllInventory -> { records: [{ id, fields }], offset? }
+  // With an `offset` param it returns the last page (no further offset), so
+  // the getAllInventory loop terminates after two pages.
+  http.get(`${API}/inventory`, ({ request }) => {
+    const hasOffset = new URL(request.url).searchParams.has("offset");
+    return HttpResponse.json(
+      hasOffset
+        ? { records: inventoryRecords }
+        : { records: inventoryRecords, offset: "mockOffsetPage2" }
+    );
   }),
 
-  // Inventory list. If the request already carries an `offset`, return the page with no further
-  // offset so pagination loops finish; otherwise expose one `offset` to exercise the loop.
-  http.get(`${BASE}/Inventory`, ({ request }) => {
-    const url = new URL(request.url);
-    const hasOffset = url.searchParams.has("offset");
-    return list(inventoryRecords, hasOffset ? {} : { offset: "mockOffsetPage2" });
-  }),
+  // checkAvailability -> { unavailableIds }
+  http.post(`${API}/inventory/availability`, () =>
+    HttpResponse.json({ unavailableIds: [] })
+  ),
 
-  // Cart fulfillment PATCH: echo back the patched record.
-  http.patch(`${BASE}/Inventory/:recordId`, async ({ params, request }) => {
-    const body = await request.json();
-    return HttpResponse.json({
-      id: params.recordId,
-      createdTime: "2024-01-01T00:00:00.000Z",
-      fields: body.fields ?? {},
-    });
-  }),
+  // createRequest -> only ok/status matter
+  http.post(`${API}/requests`, () => new HttpResponse(null, { status: 201 })),
 
-  // Manufacturers, SKUs, Partners, and Clinicians select-option sources.
-  http.get(`${BASE}/Manufacturers`, () => list(manufacturerRecords)),
-  http.get(`${BASE}/SKUs`, () => list(skuRecords)),
-  http.get(`${BASE}/SKU%20Groups`, () => list(skuGroupRecords)),
-  http.get(`${BASE}/Partners`, () => list(partnerRecords)),
-  http.get(`${BASE}/Clinicians`, () => list(clinicianRecords)),
+  // getRequestParties("partners") -> [{ id, label, clinicians: [{ id, label }] }]
+  http.get(`${API}/lists/partners`, () => HttpResponse.json(partnerOptions)),
+
+  // getList / getRequestParties -> array of { id, fields }
+  http.get(`${API}/lists/:name`, () =>
+    HttpResponse.json([{ id: "recMock1", fields: { Name: "Freedom Innovation" } }])
+  ),
 ];

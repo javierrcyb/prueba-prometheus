@@ -1,0 +1,8 @@
+﻿{
+  "partnerId": "recPARTNER0000001",
+  "clinicianId": "recCLINICIAN00001",
+  "itemIds": ["T-001"],
+  "notes": "Need pediatric sizes",
+  "numOfPatients": 2,
+  "numOfChildren": 1
+}

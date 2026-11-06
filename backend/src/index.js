@@ -30,9 +30,10 @@ export default {
     }
 
     const { pathname } = new URL(request.url);
-    const routeKey = `${request.method} ${pathname}`;
+const routeKey = `${request.method} ${pathname}`;
 
-    const handler = Object.hasOwn(routes, routeKey) ? routes[routeKey] : undefined;
+
+const handler = Object.hasOwn(routes, routeKey) ? routes[routeKey] : undefined;
 
     if (!handler) {
       return withCors(errorResponse(404, "Not found"), corsHeaders);

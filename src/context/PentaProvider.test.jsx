@@ -1,113 +1,141 @@
-// urlCreator (in PentaProvider) builds the Airtable filterByFormula server-side.
-// These tests verify the "Limb Guide" part filter is added and mapped correctly.
-// A probe reads urlCreator from context, sets a part, and renders the decoded URL.
+// buildInventoryParams (in PentaProvider) builds the query params sent to the
+// inventory API. The Airtable filterByFormula is now built server-side, so these
+// tests verify the params object: user filters are mapped correctly, SKU
+// constraints and page size pass through, and includeUserFilters=false drops
+// every user-selected filter.
 import { describe, it, expect } from "vitest";
 import { useContext, useEffect } from "react";
 import { renderWithProviders, screen, waitFor } from "../test/utils";
 import PentaContext from "./PentaContext";
 
-function UrlProbe({ part }) {
-  const { urlCreator, setSelectedPart } = useContext(PentaContext);
+const readParams = (testId) =>
+  JSON.parse(screen.getByTestId(testId).textContent);
+
+function PartProbe({ part }) {
+  const { buildInventoryParams, setSelectedPart } = useContext(PentaContext);
   useEffect(() => {
     setSelectedPart(part);
   }, [part, setSelectedPart]);
-  return <div data-testid="url">{decodeURIComponent(urlCreator())}</div>;
+  return (
+    <div data-testid="params">{JSON.stringify(buildInventoryParams())}</div>
+  );
 }
 
-function MasterUrlProbe() {
-  const { urlCreator, setSelectedManufacturer, setSearchInput } =
+function ExtremityProbe({ extremity }) {
+  const { buildInventoryParams, setExtremity, setSelectedFilters } =
     useContext(PentaContext);
   useEffect(() => {
+    setExtremity(extremity);
+    setSelectedFilters((prev) => ({ ...prev, Prosthesis: true }));
+  }, [extremity, setExtremity, setSelectedFilters]);
+  return (
+    <div data-testid="params">{JSON.stringify(buildInventoryParams())}</div>
+  );
+}
+
+function MasterProbe() {
+  const {
+    buildInventoryParams,
+    setSelectedManufacturer,
+    setSearchInput,
+  } = useContext(PentaContext);
+  useEffect(() => {
     setSelectedManufacturer([
-      { label: "Freedom Innovation", value: encodeURIComponent("Freedom Innovation") },
+      {
+        label: "Freedom Innovation",
+        value: encodeURIComponent("Freedom Innovation"),
+      },
     ]);
     setSearchInput("pylon");
   }, [setSelectedManufacturer, setSearchInput]);
   return (
     <>
-      <div data-testid="filtered">{decodeURIComponent(urlCreator())}</div>
+      <div data-testid="filtered">
+        {JSON.stringify(buildInventoryParams())}
+      </div>
       <div data-testid="master">
-        {decodeURIComponent(urlCreator({ includeUserFilters: false }))}
+        {JSON.stringify(buildInventoryParams({ includeUserFilters: false }))}
       </div>
     </>
   );
 }
 
-function GroupUrlProbe() {
-  const { urlCreator } = useContext(PentaContext);
+function GroupProbe() {
+  const { buildInventoryParams } = useContext(PentaContext);
   return (
-    <div data-testid="group-url">
-      {decodeURIComponent(
-        urlCreator({
+    <div data-testid="group-params">
+      {JSON.stringify(
+        buildInventoryParams({
           pageSize: 12,
           includeSkuCodes: ["AAFO", "ABL"],
           excludeSkuCodes: ["ADB-M"],
-          maxRecords: 1,
-          fields: ["SKU Item Code"],
         })
       )}
     </div>
   );
 }
 
-const url = () => screen.getByTestId("url").textContent;
+describe("buildInventoryParams part filter", () => {
+  it.each(["Feet", "Knees/Hips", "Accessories"])(
+    "passes the %s part through as the part param",
+    async (part) => {
+      renderWithProviders(<PartProbe part={part} />);
+      await waitFor(() => expect(readParams("params").part).toBe(part));
+    }
+  );
 
-describe("urlCreator Limb Guide part filter", () => {
-  it.each([
-    ["Feet", 'FIND("Feet", ARRAYJOIN({Limb Guide}))'],
-    ["Knees/Hips", 'FIND("Knees/ Hips", ARRAYJOIN({Limb Guide}))'],
-    ["Accessories", 'FIND("Accessory/ Misc.", ARRAYJOIN({Limb Guide}))'],
-  ])("maps the %s part to its Limb Guide condition", async (part, expected) => {
-    renderWithProviders(<UrlProbe part={part} />);
-    await waitFor(() => expect(url()).toContain(expected));
-  });
-
-  it("applies no Limb Guide filter for 'All' or no selection", async () => {
-    renderWithProviders(<UrlProbe part="All" />);
-    // Give the effect a tick, then confirm the condition is absent.
-    await waitFor(() => expect(url()).toContain("filterByFormula"));
-    expect(url()).not.toContain("Limb Guide");
+  it("sends no part param when nothing is selected", () => {
+    renderWithProviders(<PartProbe part="" />);
+    expect(readParams("params")).not.toHaveProperty("part");
   });
 });
 
-describe("urlCreator grouped inventory options", () => {
-  it("adds SKU constraints and request sizing", () => {
-    renderWithProviders(<GroupUrlProbe />);
-    const groupUrl = screen.getByTestId("group-url").textContent;
+describe("buildInventoryParams extremity + tags", () => {
+  it("sends extremity and tags when a specific extremity is chosen", async () => {
+    renderWithProviders(<ExtremityProbe extremity="Lower" />);
+    await waitFor(() => expect(readParams("params").extremity).toBe("Lower"));
+    expect(readParams("params").tags).toEqual(["Prosthesis"]);
+  });
 
-    expect(groupUrl).toContain("pageSize=12");
-    expect(groupUrl).toContain("maxRecords=1");
-    expect(groupUrl).toContain("fields[]=SKU Item Code");
-    expect(groupUrl).toContain(
-      'OR({SKU Item Code}="AAFO",{SKU Item Code}="ABL")'
-    );
-    expect(groupUrl).toContain('NOT(OR({SKU Item Code}="ADB-M"))');
+  it("omits extremity when it is 'All'", async () => {
+    renderWithProviders(<ExtremityProbe extremity="All" />);
+    await waitFor(() => expect(readParams("params").tags).toEqual(["Prosthesis"]));
+    expect(readParams("params")).not.toHaveProperty("extremity");
   });
 });
 
-describe("urlCreator master list (includeUserFilters=false)", () => {
-  it("keeps base availability filters but drops user filters/search", async () => {
-    renderWithProviders(<MasterUrlProbe />);
+describe("buildInventoryParams grouped inventory options", () => {
+  it("adds SKU constraints and page size", () => {
+    renderWithProviders(<GroupProbe />);
+    const params = readParams("group-params");
 
-    // Wait until the user filters are reflected in the default URL.
+    expect(params.pageSize).toBe(12);
+    expect(params.includeSku).toEqual(["AAFO", "ABL"]);
+    expect(params.excludeSku).toEqual(["ADB-M"]);
+  });
+});
+
+describe("buildInventoryParams master list (includeUserFilters=false)", () => {
+  it("drops user filters/search and keeps only the page size", async () => {
+    renderWithProviders(<MasterProbe />);
+
+    // Wait until the user filters are reflected in the default params.
     await waitFor(() =>
-      expect(screen.getByTestId("filtered").textContent).toContain(
-        "{Manufacturer}='Freedom Innovation'"
-      )
+      expect(readParams("filtered").manufacturers).toEqual([
+        "Freedom Innovation",
+      ])
     );
 
-    const filtered = screen.getByTestId("filtered").textContent;
-    const master = screen.getByTestId("master").textContent;
+    const filtered = readParams("filtered");
+    const master = readParams("master");
 
-    // The normal URL applies the selected manufacturer and search.
-    expect(filtered).toContain("{Manufacturer}='Freedom Innovation'");
-    expect(filtered).toContain('SEARCH("pylon"');
+    // The normal params apply the selected manufacturer (decoded) and search.
+    expect(filtered.manufacturers).toEqual(["Freedom Innovation"]);
+    expect(filtered.search).toBe("pylon");
 
-    // The master-list URL keeps the base availability filters...
-    expect(master).toContain("{Requests}=BLANK()");
-    expect(master).toContain("{Shipment Status}=BLANK()");
-    // ...but omits the user-selected filters and search.
-    expect(master).not.toContain("{Manufacturer}=");
-    expect(master).not.toContain('SEARCH("pylon"');
+    // The master-list params omit every user-selected filter and search.
+    expect(master).not.toHaveProperty("manufacturers");
+    expect(master).not.toHaveProperty("search");
+    expect(master).toEqual({ pageSize: 36 });
   });
 });

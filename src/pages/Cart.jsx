@@ -18,11 +18,6 @@ import {
   DrawerTitle,
 } from "@/components/ui/drawer";
 import {
-  AIRTABLE_API_KEY,
-  AIRTABLE_API_URL,
-  AIRTABLE_BASE_ID,
-} from "../config/airtable";
-import {
   clearCartItems,
   getCartItemKeys,
   getRequestParty,

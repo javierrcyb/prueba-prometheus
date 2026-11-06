@@ -1,8 +1,8 @@
 // Integration tests for the Option D group-level bulk order flow rendered by Home.
 // An "Add multiple to cart" action appears in the group-context bar only for single-SKU groups; it opens the
 // shared QuantityModal and FIFO-fills units from the cached master inventory into localStorage.
-// The SKU Groups + inventory endpoints are served by MSW; setup.js clears storage between tests.
-import { describe, it, expect } from "vitest";
+// The backend calls (lib/api) are mocked; setup.js clears storage between tests.
+import { describe, it, expect, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 import {
   fireEvent,
@@ -16,7 +16,41 @@ import App from "../App";
 import PentaProvider from "../context/PentaProvider";
 import Home from "./Home";
 
-// adb-m is a single-SKU group ("ADB-M"); orthotics is multi-SKU ("AAFO","ABL").
+// GET /api/sku-groups already returns normalized groups (the backend does it).
+// adb-m is a single-SKU group; orthotics is multi-SKU.
+const { skuGroups } = vi.hoisted(() => ({
+  skuGroups: [
+    {
+      id: "adb-m",
+      key: "adb-m",
+      title: "Double Adapter - Male",
+      skuCodes: ["ADB-M"],
+    },
+    {
+      id: "orthotics",
+      key: "orthotics",
+      title: "Orthotics",
+      skuCodes: ["AAFO", "ABL"],
+    },
+  ],
+}));
+
+// Plain async functions (not vi.fn) so restoreAllMocks can't wipe them.
+vi.mock("../lib/api", () => ({
+  getSiteStatus: async () => ({
+    announcement: { status: "Offline", message: "" },
+    platform: { status: "Online", message: "" },
+  }),
+  getSKUGroups: async () => skuGroups,
+  getMaxSize: async () => 60,
+  getInventoryPage: async () => ({ records: [], offset: null }),
+  getAllInventory: async () => [],
+  getList: async () => [],
+  getRequestParties: async () => [],
+  checkAvailability: async () => [],
+  createRequest: async () => ({ ok: true, status: 201 }),
+}));
+
 const renderHomeAtGroup = (groupKey) =>
   render(
     <MemoryRouter initialEntries={[`/?group=${groupKey}`]}>
@@ -28,6 +62,8 @@ const renderHomeAtGroup = (groupKey) =>
 
 const renderHomeOverview = () => renderWithProviders(<App />);
 
+// Seeding the session cache makes PentaProvider use it instead of calling
+// getAllInventory, so each test controls the master list.
 const seedMasterList = (fields) =>
   sessionStorage.setItem("allInventoryItems", JSON.stringify(fields));
 

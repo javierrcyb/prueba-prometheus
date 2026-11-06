@@ -1,5 +1,6 @@
 import { useState, useEffect, useContext } from "react";
 import PentaContext from "../../context/PentaContext";
+import { getList } from "../../lib/api"
 import {
   Combobox,
   ComboboxChips,
@@ -14,7 +15,7 @@ import {
 } from "@/components/ui/combobox";
 
 const Manufacturer = () => {
-  const { selectedManufacturer, setSelectedManufacturer, fetchSelectOptions } =
+  const { selectedManufacturer, setSelectedManufacturer } =
     useContext(PentaContext);
 
   const [manuOptions, setManu] = useState([]);
@@ -22,11 +23,32 @@ const Manufacturer = () => {
 
   // load manufacturers (unchanged)
   useEffect(() => {
+    let cancelled = false;
+
     (async () => {
-      const manufacturersOptions = await fetchSelectOptions("Manufacturers");
-      setManu(manufacturersOptions || []);
+      const records = await getList("manufacturers");
+      if (cancelled) return;
+
+      if (records === null) {
+        setManu([]);
+        return;
+      }
+
+      // Same label/value mapping that fetchSelectOptions did.
+      const options = records
+        .filter((record) => typeof record.fields?.Name === "string")
+        .map((record) => ({
+          label: record.fields.Name.trimStart(),
+          value: encodeURIComponent(record.fields.Name.trimStart()),
+        }))
+        .sort((a, b) => a.label.localeCompare(b.label));
+      setManu(options);
     })();
-  }, [fetchSelectOptions]);
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   return (
     <>

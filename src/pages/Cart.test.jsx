@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
 import { render, screen, userEvent, waitFor } from "../test/utils";
 import PentaContext from "../context/PentaContext";
@@ -13,7 +13,87 @@ import {
   getRequestParty,
   setRequestParty,
 } from "../lib/storage";
-import { clinicianRecords, partnerRecords } from "../test/mocks/fixtures";
+
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+// ---- helpers -------------------------------------------------------------
+
+const demoParty = {
+  partnerId: "recDemoClinic",
+  partnerName: "Demo Clinic",
+  clinicianRequired: false,
+  clinicianId: null,
+  clinicianName: null,
+};
+
+const seedDemoCart = () => {
+  localStorage.setItem("partner", demoParty.partnerName);
+  setRequestParty(demoParty);
+  localStorage.setItem(
+    "22-1287",
+    JSON.stringify({
+      "Item ID": "22-1287",
+      "Description (from SKU)": ["Demo Item"],
+    })
+  );
+};
+
+// Mocks the app's own backend (routes from src/lib/api.js):
+//   POST /api/inventory/availability -> { unavailableIds }
+//   POST /api/requests               -> only ok/status matter
+const mockBackend = ({
+  unavailableIds = [],
+  requestResult = { ok: true, status: 201 },
+  onRequest,
+} = {}) =>
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (url, options = {}) => {
+    const path = String(url);
+    if (path.endsWith("/api/inventory/availability")) {
+      return { ok: true, status: 200, json: async () => ({ unavailableIds }) };
+    }
+    if (path.endsWith("/api/requests") && options.method === "POST") {
+      onRequest?.(JSON.parse(options.body));
+      return { ...requestResult, json: async () => ({}) };
+    }
+    throw new Error(`Unexpected request: ${path}`);
+  });
+
+const callsTo = (spy, suffix) =>
+  spy.mock.calls.filter(([url]) => String(url).endsWith(suffix));
+
+const renderCart = (contextOverrides = {}, initialEntries = ["/cart"]) =>
+  render(
+    <MemoryRouter initialEntries={initialEntries}>
+      <PentaContext.Provider
+        value={{
+          inventoryGroups: [],
+          selectedPartner: "Demo Clinic",
+          setSelectedPartner: vi.fn(),
+          setCartCount: vi.fn(),
+          ...contextOverrides,
+        }}
+      >
+        <Cart />
+      </PentaContext.Provider>
+    </MemoryRouter>,
+    { withProviders: false }
+  );
+
+const fillPatientCounts = async (user, patients, children) => {
+  await user.type(
+    screen.getByLabelText(/How many patients do you plan to help/i),
+    patients
+  );
+  await user.type(
+    screen.getByLabelText(/How many of the patients are children/i),
+    children
+  );
+};
+
+// ---- tests ---------------------------------------------------------------
 
 describe("Cart item detection", () => {
   it("treats application metadata as an empty cart", () => {
@@ -36,106 +116,81 @@ describe("Cart item detection", () => {
 describe("Cart availability checks", () => {
   it("defers the availability request until the user submits the cart", async () => {
     const user = userEvent.setup();
-    localStorage.setItem("partner", "Demo Clinic");
-    setRequestParty({
-      partnerId: "recDemoClinic",
-      partnerName: "Demo Clinic",
-      clinicianRequired: false,
-      clinicianId: null,
-      clinicianName: null,
-    });
-    localStorage.setItem(
-      "22-1287",
-      JSON.stringify({
-        "Item ID": "22-1287",
-        "Description (from SKU)": ["Demo Item"],
-      })
-    );
-    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue({
-      ok: true,
-      json: async () => ({ records: [] }),
-    });
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    seedDemoCart();
+    const fetchSpy = mockBackend();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
 
-    render(
-      <MemoryRouter>
-        <PentaContext.Provider
-          value={{
-            inventoryGroups: [],
-            selectedPartner: "Demo Clinic",
-            setSelectedPartner: vi.fn(),
-            setCartCount: vi.fn(),
-          }}
-        >
-          <Cart />
-        </PentaContext.Provider>
-      </MemoryRouter>,
-      { withProviders: false }
-    );
+    renderCart();
 
     expect(fetchSpy).not.toHaveBeenCalled();
-    await user.type(
-      screen.getByLabelText(/How many patients do you plan to help/i),
-      "1"
-    );
-    await user.type(
-      screen.getByLabelText(/How many of the patients are children/i),
-      "0"
-    );
+    await fillPatientCounts(user, "1", "0");
+    expect(fetchSpy).not.toHaveBeenCalled();
+
     await user.click(screen.getByRole("button", { name: "Confirm" }));
 
-    await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
-    fetchSpy.mockRestore();
-    confirmSpy.mockRestore();
+    await waitFor(() =>
+      expect(callsTo(fetchSpy, "/api/inventory/availability")).toHaveLength(1)
+    );
   });
 
-  it("checks multiple items in one request and reports missing items as unavailable", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        records: [{ fields: { "Item ID": "22-1287" } }],
-      }),
+  it("checks multiple items in one request and reports unavailable ones", async () => {
+    const fetchSpy = mockBackend({ unavailableIds: ["23-1689"] });
+
+    const result = await checkCartItemAvailability(["22-1287", "23-1689"]);
+
+    const calls = callsTo(fetchSpy, "/api/inventory/availability");
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(calls[0][1].body)).toEqual({
+      itemIds: ["22-1287", "23-1689"],
     });
-
-    const result = await checkCartItemAvailability(
-      ["22-1287", "23-1689"],
-      fetchImpl
-    );
-
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
-    const requestUrl = new URL(fetchImpl.mock.calls[0][0]);
-    expect(requestUrl.searchParams.get("filterByFormula")).toContain(
-      "OR({Item ID}='22-1287',{Item ID}='23-1689')"
-    );
-    expect(requestUrl.searchParams.getAll("fields[]")).toEqual(["Item ID"]);
     expect(result.unavailableIds).toEqual(["23-1689"]);
     expect(result.failedIds).toEqual([]);
+    expect(result.statuses).toEqual({ "22-1287": "done", "23-1689": "done" });
   });
 
-  it("checks carts over 100 items in sequential batches", async () => {
+  it("ignores empty ids and sends each id only once", async () => {
+    const fetchSpy = mockBackend();
+
+    await checkCartItemAvailability(["22-1287", "", null, "22-1287"]);
+
+    const calls = callsTo(fetchSpy, "/api/inventory/availability");
+    expect(JSON.parse(calls[0][1].body)).toEqual({ itemIds: ["22-1287"] });
+  });
+
+  it("checks carts over 100 items in sequential batches and merges the results", async () => {
     const itemIds = Array.from({ length: 101 }, (_, index) => `ITEM-${index + 1}`);
-    const fetchImpl = vi.fn(async (url) => {
-      const formula = new URL(url).searchParams.get("filterByFormula");
-      const records = itemIds
-        .filter((id) => formula.includes(`{Item ID}='${id}'`))
-        .map((id) => ({ fields: { "Item ID": id } }));
-      return { ok: true, json: async () => ({ records }) };
-    });
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (url, options) => {
+        const { itemIds: batch } = JSON.parse(options.body);
+        // Mark the last id of each batch as unavailable.
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ unavailableIds: [batch[batch.length - 1]] }),
+        };
+      });
 
-    const result = await checkCartItemAvailability(itemIds, fetchImpl);
+    const result = await checkCartItemAvailability(itemIds);
 
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
-    expect(result.unavailableIds).toEqual([]);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    const batches = fetchSpy.mock.calls.map(
+      ([, options]) => JSON.parse(options.body).itemIds
+    );
+    expect(batches[0]).toHaveLength(100);
+    expect(batches[1]).toEqual(["ITEM-101"]);
+    expect(result.unavailableIds).toEqual(["ITEM-100", "ITEM-101"]);
     expect(result.failedIds).toEqual([]);
   });
 
   it("fails closed when availability cannot be verified", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue({
+    vi.spyOn(globalThis, "fetch").mockResolvedValue({
       ok: false,
       status: 503,
+      statusText: "Service Unavailable",
     });
 
-    const result = await checkCartItemAvailability(["22-1287"], fetchImpl);
+    const result = await checkCartItemAvailability(["22-1287"]);
 
     expect(result.unavailableIds).toEqual([]);
     expect(result.failedIds).toEqual(["22-1287"]);
@@ -143,6 +198,9 @@ describe("Cart availability checks", () => {
   });
 });
 
+// NOTE: createRequestFields is no longer used by Cart (the backend builds the
+// Airtable fields now). These tests still pass, but the function and its tests
+// can be deleted together.
 describe("Requests payload", () => {
   const baseInput = {
     requestName: "#ABC123",
@@ -172,21 +230,17 @@ describe("Requests payload", () => {
   it("omits Clinician for a partner without mappings", () => {
     const fields = createRequestFields({
       ...baseInput,
-      requestParty: {
-        partnerId: "recPartner",
-        partnerName: "Demo Clinic",
-        clinicianRequired: false,
-        clinicianId: null,
-        clinicianName: null,
-      },
+      requestParty: demoParty,
     });
 
-    expect(fields.Partner).toEqual(["recPartner"]);
-  expect(fields).not.toHaveProperty("Clinician");
+    expect(fields.Partner).toEqual(["recDemoClinic"]);
+    expect(fields).not.toHaveProperty("Clinician");
     expect(fields).not.toHaveProperty("Clinicians");
   });
+});
 
-  it("sends the selected clinician in the Requests POST", async () => {
+describe("Cart checkout", () => {
+  it("sends the selected partner and clinician in the POST /api/requests body", async () => {
     const user = userEvent.setup();
     const setSelectedPartner = vi.fn();
     localStorage.setItem("partner", "Stepping into Grace");
@@ -204,38 +258,17 @@ describe("Requests payload", () => {
         "Description (from SKU)": ["Demo Item"],
       })
     );
+    // A stale master-list cache that must be invalidated after a successful request.
+    sessionStorage.setItem("allInventoryItems", "[]");
 
     let requestBody;
-    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, options = {}) => {
-      if (String(url).includes("/Inventory?")) {
-        return {
-          ok: true,
-          json: async () => ({ records: [{ fields: { "Item ID": "22-1287" } }] }),
-        };
-      }
-      if (String(url).endsWith("/Requests") && options.method === "POST") {
-        requestBody = JSON.parse(options.body);
-        return { ok: true, json: async () => ({ records: [{ id: "recRequest" }] }) };
-      }
-      throw new Error(`Unexpected request: ${url}`);
-    });
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    mockBackend({ onRequest: (body) => (requestBody = body) });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
 
-    render(
-      <MemoryRouter initialEntries={["/cart"]}>
-        <PentaContext.Provider
-          value={{
-            inventoryGroups: [],
-            selectedPartner: "Stepping into Grace",
-            setSelectedPartner,
-            setCartCount: vi.fn(),
-          }}
-        >
-          <Cart />
-        </PentaContext.Provider>
-      </MemoryRouter>,
-      { withProviders: false }
-    );
+    renderCart({
+      selectedPartner: "Stepping into Grace",
+      setSelectedPartner,
+    });
 
     expect(screen.getByText("Alex Morgan")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "ResetCart" })).toHaveTextContent(
@@ -247,21 +280,25 @@ describe("Requests payload", () => {
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Clear" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Cancel" }));
-    await user.type(
-      screen.getByLabelText(/How many patients do you plan to help/i),
-      "2"
-    );
-    await user.type(
-      screen.getByLabelText(/How many of the patients are children/i),
-      "1"
-    );
+
+    await fillPatientCounts(user, "2", "1");
     await user.click(screen.getByRole("button", { name: "Confirm" }));
 
     await waitFor(() => expect(requestBody).toBeDefined());
-    expect(requestBody.records[0].fields.Partner).toEqual(["recPartner"]);
-    expect(requestBody.records[0].fields.Clinician).toEqual(["recClinician"]);
-    expect(requestBody.records[0].fields).not.toHaveProperty("Clinicians");
+    expect(requestBody).toEqual(
+      expect.objectContaining({
+        partnerId: "recPartner",
+        clinicianId: "recClinician",
+        itemIds: ["22-1287"],
+        numOfPatients: 2,
+        numOfChildren: 1,
+      })
+    );
+
+    // Success clears the cart and the stale inventory cache...
     await waitFor(() => expect(localStorage.getItem("22-1287")).toBeNull());
+    expect(sessionStorage.getItem("allInventoryItems")).toBeNull();
+    // ...but keeps the request party for the next order.
     expect(getRequestParty()).toEqual({
       partnerId: "recPartner",
       partnerName: "Stepping into Grace",
@@ -271,67 +308,33 @@ describe("Requests payload", () => {
     });
     expect(localStorage.getItem("partner")).toBe("Stepping into Grace");
     expect(setSelectedPartner).not.toHaveBeenCalledWith("");
-
-    fetchSpy.mockRestore();
-    confirmSpy.mockRestore();
   });
 
-  it("preserves checkout state when the Requests write fails", async () => {
+  it("sends clinicianId as null for a partner without clinician", async () => {
     const user = userEvent.setup();
-    localStorage.setItem("partner", "Demo Clinic");
-    setRequestParty({
-      partnerId: "recDemoClinic",
-      partnerName: "Demo Clinic",
-      clinicianRequired: false,
-      clinicianId: null,
-      clinicianName: null,
-    });
-    localStorage.setItem(
-      "22-1287",
-      JSON.stringify({
-        "Item ID": "22-1287",
-        "Description (from SKU)": ["Demo Item"],
-      })
-    );
-    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
-      if (String(url).includes("/Inventory?")) {
-        return {
-          ok: true,
-          json: async () => ({ records: [{ fields: { "Item ID": "22-1287" } }] }),
-        };
-      }
-      return {
-        ok: false,
-        status: 500,
-        json: async () => ({ error: { type: "SERVER_ERROR" } }),
-      };
-    });
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    seedDemoCart();
+    let requestBody;
+    mockBackend({ onRequest: (body) => (requestBody = body) });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
 
-    render(
-      <MemoryRouter initialEntries={["/cart"]}>
-        <PentaContext.Provider
-          value={{
-            inventoryGroups: [],
-            selectedPartner: "Demo Clinic",
-            setSelectedPartner: vi.fn(),
-            setCartCount: vi.fn(),
-          }}
-        >
-          <Cart />
-        </PentaContext.Provider>
-      </MemoryRouter>,
-      { withProviders: false }
-    );
+    renderCart();
+    await fillPatientCounts(user, "3", "0");
+    await user.click(screen.getByRole("button", { name: "Confirm" }));
 
-    await user.type(
-      screen.getByLabelText(/How many patients do you plan to help/i),
-      "4"
-    );
-    await user.type(
-      screen.getByLabelText(/How many of the patients are children/i),
-      "0"
-    );
+    await waitFor(() => expect(requestBody).toBeDefined());
+    expect(requestBody.partnerId).toBe("recDemoClinic");
+    expect(requestBody.clinicianId).toBeNull();
+  });
+
+  it("preserves checkout state when the request write fails", async () => {
+    const user = userEvent.setup();
+    seedDemoCart();
+    mockBackend({ requestResult: { ok: false, status: 500 } });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    renderCart();
+
+    await fillPatientCounts(user, "4", "0");
     await user.type(screen.getByLabelText(/Additional notes/i), "Keep this work");
     await user.click(screen.getByRole("button", { name: "Confirm" }));
 
@@ -342,9 +345,68 @@ describe("Requests payload", () => {
     expect(screen.getByLabelText(/Additional notes/i)).toHaveValue("Keep this work");
     expect(localStorage.getItem("22-1287")).not.toBeNull();
     expect(getRequestParty()).not.toBeNull();
+  });
 
-    fetchSpy.mockRestore();
-    confirmSpy.mockRestore();
+  it("keeps the cart when the backend answers 409 (items taken meanwhile)", async () => {
+    const user = userEvent.setup();
+    seedDemoCart();
+    sessionStorage.setItem("allInventoryItems", "[]");
+    const fetchSpy = mockBackend({
+      requestResult: { ok: false, status: 409 },
+    });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    renderCart();
+    await fillPatientCounts(user, "2", "1");
+    await user.click(screen.getByRole("button", { name: "Confirm" }));
+
+    await waitFor(() =>
+      expect(callsTo(fetchSpy, "/api/requests")).toHaveLength(1)
+    );
+    expect(await screen.findByRole("heading", { name: "Cart" })).toBeInTheDocument();
+    expect(localStorage.getItem("22-1287")).not.toBeNull();
+    // The cache is only invalidated on success.
+    expect(sessionStorage.getItem("allInventoryItems")).toBe("[]");
+  });
+
+  it("does not create the request when an item is no longer available", async () => {
+    const user = userEvent.setup();
+    seedDemoCart();
+    const fetchSpy = mockBackend({ unavailableIds: ["22-1287"] });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    renderCart();
+    await fillPatientCounts(user, "2", "1");
+    await user.click(screen.getByRole("button", { name: "Confirm" }));
+
+    await waitFor(() =>
+      expect(callsTo(fetchSpy, "/api/inventory/availability")).toHaveLength(1)
+    );
+    expect(callsTo(fetchSpy, "/api/requests")).toHaveLength(0);
+    expect(localStorage.getItem("22-1287")).not.toBeNull();
+    // With an unavailable item, the request can't be submitted until it's removed.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Confirm" })).toBeDisabled()
+    );
+  });
+
+  it("does not create the request when availability cannot be verified", async () => {
+    const user = userEvent.setup();
+    seedDemoCart();
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: false,
+      status: 503,
+      statusText: "Service Unavailable",
+    });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    renderCart();
+    await fillPatientCounts(user, "2", "1");
+    await user.click(screen.getByRole("button", { name: "Confirm" }));
+
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+    expect(callsTo(fetchSpy, "/api/requests")).toHaveLength(0);
+    expect(localStorage.getItem("22-1287")).not.toBeNull();
   });
 
   it("redirects a legacy partner-only session to Partner selection", async () => {
@@ -376,37 +438,9 @@ describe("Requests payload", () => {
 describe("Cart request context", () => {
   it("requires both patient counts before enabling the request", async () => {
     const user = userEvent.setup();
-    localStorage.setItem("partner", "Demo Clinic");
-    setRequestParty({
-      partnerId: "recDemoClinic",
-      partnerName: "Demo Clinic",
-      clinicianRequired: false,
-      clinicianId: null,
-      clinicianName: null,
-    });
-    localStorage.setItem(
-      "22-1287",
-      JSON.stringify({
-        "Item ID": "22-1287",
-        "Description (from SKU)": ["Demo Item"],
-      })
-    );
+    seedDemoCart();
 
-    render(
-      <MemoryRouter initialEntries={["/cart"]}>
-        <PentaContext.Provider
-          value={{
-            inventoryGroups: [],
-            selectedPartner: "Demo Clinic",
-            setSelectedPartner: vi.fn(),
-            setCartCount: vi.fn(),
-          }}
-        >
-          <Cart />
-        </PentaContext.Provider>
-      </MemoryRouter>,
-      { withProviders: false }
-    );
+    renderCart();
 
     const patientsInput = screen.getByLabelText(
       /How many patients do you plan to help/i
@@ -503,6 +537,30 @@ describe("Cart request context", () => {
       clinicianName: "Alex Morgan",
     });
 
+        // GET /api/lists/partners -> [{ id, label, clinicians: [{ id, label }] }]
+    const partnersResponse = [
+      {
+        id: "recF5bBGGYd4Oezt4",
+        label: "2ft Prosthetics",
+        clinicians: [],
+      },
+      {
+        id: "recSteppingIntoGrace",
+        label: "Stepping into Grace",
+        clinicians: [
+          { id: "recClinicianA", label: "Alex Morgan" },
+          { id: "recClinicianB", label: "Sam Rivera" },
+        ],
+      },
+    ];
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+      if (String(url).endsWith("/api/lists/partners")) {
+        return { ok: true, json: async () => partnersResponse };
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+
     const Harness = () => {
       const [selectedPartner, setSelectedPartner] = useState(
         "Stepping into Grace"
@@ -514,9 +572,6 @@ describe("Cart request context", () => {
             selectedPartner,
             setSelectedPartner,
             setCartCount: vi.fn(),
-            fetchTableRecordsWithOffset: vi.fn(async (table) =>
-              table === "Partners" ? partnerRecords : clinicianRecords
-            ),
           }}
         >
           <Cart />
@@ -569,29 +624,9 @@ describe("Cart request context", () => {
 
   it("shows a focused empty state instead of request controls", () => {
     localStorage.setItem("partner", "Demo Clinic");
-    setRequestParty({
-      partnerId: "recDemoClinic",
-      partnerName: "Demo Clinic",
-      clinicianRequired: false,
-      clinicianId: null,
-      clinicianName: null,
-    });
+    setRequestParty(demoParty);
 
-    render(
-      <MemoryRouter initialEntries={["/cart"]}>
-        <PentaContext.Provider
-          value={{
-            inventoryGroups: [],
-            selectedPartner: "Demo Clinic",
-            setSelectedPartner: vi.fn(),
-            setCartCount: vi.fn(),
-          }}
-        >
-          <Cart />
-        </PentaContext.Provider>
-      </MemoryRouter>,
-      { withProviders: false }
-    );
+    renderCart();
 
     expect(
       screen.getByRole("heading", { name: "Your cart is empty" })

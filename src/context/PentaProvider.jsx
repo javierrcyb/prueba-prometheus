@@ -1,14 +1,5 @@
 import { useState, useEffect } from "react";
 import PentaContext from "./PentaContext";
-import {
-  normalizeInventoryGroups,
-  SKU_GROUPS_TABLE,
-} from "../config/inventoryGroups";
-import {
-  AIRTABLE_API_KEY,
-  AIRTABLE_API_URL,
-  AIRTABLE_BASE_ID,
-} from "../config/airtable";
 import { getCartItemKeys } from "../lib/storage";
 import {
   getSiteStatus,

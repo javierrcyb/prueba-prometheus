@@ -7,6 +7,8 @@ import { buildInventoryFormula } from "../lib/formula.js";
 // One page of available inventory. The browser sends simple parameters; this
 // handler validates them, builds the Airtable formula itself and asks Airtable.
 export async function handleInventory(request, env) {
+
+
   const { value, error } = parseInventoryParams(new URL(request.url));
 
   // Bad input from the client is a 400, not a server error.

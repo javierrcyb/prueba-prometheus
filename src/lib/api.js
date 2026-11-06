@@ -134,3 +134,17 @@ export async function createRequest(data) {
   }
 }
  
+// Reads one of the approved lists. name must be one the backend allows (for now
+// "manufacturers"). Returns an array of { id, fields }, or null if it fails.
+export async function getList(name) {
+  try {
+    const response = await fetch(`${API_URL}/api/lists/${encodeURIComponent(name)}`);
+    if (!response.ok) throw new Error(`Error fetching list: ${response.statusText}`);
+ 
+    const data = await response.json();
+    return Array.isArray(data) ? data : null;
+  } catch (error) {
+    console.error(`Error in calling /api/lists/${name}:`, error);
+    return null;
+  }
+}

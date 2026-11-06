@@ -165,3 +165,14 @@ export const clinicianRecords = [
   { id: "recClinicianB", fields: { Name: "Jordan Lee", Partner: ["recSteppingIntoGrace"], "Partner (from Partner)": ["Stepping into Grace"] } },
   { id: "recClinicianUnassigned", fields: { Name: "Unassigned Clinician" } },
 ];
+
+export const partnerOptions = partnerRecords
+  .filter((partner) => partner.fields.Tag === "ACTIVE")
+  .map((partner) => ({
+    id: partner.id,
+    label: partner.fields.Partner,
+    clinicians: clinicianRecords
+      .filter((clinician) => clinician.fields.Partner?.includes(partner.id))
+      .map((clinician) => ({ id: clinician.id, label: clinician.fields.Name })),
+  }))
+  .sort((a, b) => a.label.localeCompare(b.label));

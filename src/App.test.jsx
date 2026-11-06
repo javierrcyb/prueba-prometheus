@@ -1,16 +1,21 @@
 // Integration test for the App-level Maintenance/Home gate.
-// PentaProvider fetches /Site-Status on mount; App renders Maintenance when the platform record
-// reports "Offline", otherwise the normal Home UI.
+// PentaProvider fetches GET /api/site-status on mount; App renders Maintenance when
+// platform.status is "Offline", otherwise the normal Home UI.
 import { describe, it, expect } from "vitest";
 import { http, HttpResponse } from "msw";
 import { fireEvent, renderWithProviders, screen } from "./test/utils";
 import App from "./App";
-import { AIRTABLE_API_URL, AIRTABLE_BASE_ID } from "./config/airtable";
+import { API_URL } from "./config/api";
 import { server } from "./test/mocks/server";
-import { siteStatusOfflineRecords } from "./test/mocks/fixtures";
 
-const SITE_STATUS_URL =
-  `${AIRTABLE_API_URL}/${AIRTABLE_BASE_ID}/Site-Status`;
+const SITE_STATUS_URL = `${API_URL}/api/site-status`;
+
+const MAINTENANCE_MESSAGE = "Under repairs. Thanks for your patience!";
+
+const offlineStatus = {
+  announcement: { status: "Offline", message: "" },
+  platform: { status: "Offline", message: MAINTENANCE_MESSAGE },
+};
 
 describe("App status gate", () => {
   it("renders the Home UI when the platform status is Online (default handler)", async () => {
@@ -23,49 +28,35 @@ describe("App status gate", () => {
   });
 
   it("renders the Maintenance page when the platform status is Offline", async () => {
-    server.use(
-      http.get(SITE_STATUS_URL, () =>
-        HttpResponse.json({ records: siteStatusOfflineRecords })
-      )
-    );
+    server.use(http.get(SITE_STATUS_URL, () => HttpResponse.json(offlineStatus)));
 
     renderWithProviders(<App />);
 
-    expect(
-      await screen.findByText("Under repairs. Thanks for your patience!")
-    ).toBeInTheDocument();
+    expect(await screen.findByText(MAINTENANCE_MESSAGE)).toBeInTheDocument();
     expect(screen.queryByAltText("logo")).not.toBeInTheDocument();
   });
 
-  it("refreshes status on focus and identifies records independently of order", async () => {
+  it("refreshes status on focus and switches to Maintenance", async () => {
     renderWithProviders(<App />);
     expect(await screen.findByAltText("logo")).toBeInTheDocument();
 
-    server.use(
-      http.get(SITE_STATUS_URL, () =>
-        HttpResponse.json({ records: [...siteStatusOfflineRecords].reverse() })
-      )
-    );
+    server.use(http.get(SITE_STATUS_URL, () => HttpResponse.json(offlineStatus)));
     fireEvent.focus(window);
 
-    expect(
-      await screen.findByText("Under repairs. Thanks for your patience!")
-    ).toBeInTheDocument();
+    expect(await screen.findByText(MAINTENANCE_MESSAGE)).toBeInTheDocument();
     expect(screen.queryByAltText("logo")).not.toBeInTheDocument();
   });
 
   it("holds a loading screen until the status resolves, then shows Home", async () => {
     renderWithProviders(<App />);
 
-    // serverStatus starts as null (unknown). The app must NOT render inventory
-    // yet - it holds a loading screen so a request can't start before an
-    // eventual "Offline" response would replace the UI.
-    expect(screen.getByText("Loading...")).toBeInTheDocument();
+    // serverStatus starts as null (unknown). The app must NOT render the layout
+    // yet, so a request can't start before an eventual "Offline" response.
     expect(screen.queryByAltText("logo")).not.toBeInTheDocument();
+    expect(screen.queryByAltText("Company Logo")).not.toBeInTheDocument();
 
     // Once the status resolves to Online, the Home UI appears.
     expect(await screen.findByAltText("logo")).toBeInTheDocument();
-    expect(screen.queryByAltText("Company Logo")).not.toBeInTheDocument();
   });
 
   it("shows an error message when the status fetch fails", async () => {
@@ -77,6 +68,21 @@ describe("App status gate", () => {
     expect(
       await screen.findByText(/trouble reaching the inventory service/i)
     ).toBeInTheDocument();
+    expect(screen.queryByAltText("logo")).not.toBeInTheDocument();
     expect(screen.queryByAltText("Company Logo")).not.toBeInTheDocument();
+  });
+
+  it("shows an error message when the status endpoint returns 500", async () => {
+    server.use(
+      http.get(SITE_STATUS_URL, () =>
+        HttpResponse.json({ error: "Server error" }, { status: 500 })
+      )
+    );
+
+    renderWithProviders(<App />);
+
+    expect(
+      await screen.findByText(/trouble reaching the inventory service/i)
+    ).toBeInTheDocument();
   });
 });
